@@ -1,20 +1,29 @@
 # openclaw-pull-notify-action
 
-Reusable GitHub Action to send a lightweight "repo updated" notification to OpenClaw (or any webhook receiver), so your local agent can run a pull routine.
+Reusable GitHub Action to trigger OpenClaw webhooks on push events.
+
+Primary use: send push metadata to OpenClaw `/hooks/wake` (or `/hooks/agent`) so your local agent can run a pull routine.
 
 ## Inputs
 
-- `notify_url` (required): HTTPS endpoint receiving JSON payload
-- `shared_secret` (optional): bearer token sent as `Authorization: Bearer ...`
+- `hook_url` (recommended): full webhook URL (e.g. `https://your-gateway/hooks/wake`)
+- `notify_url` (legacy alias for `hook_url`)
+- `shared_secret` (required): OpenClaw hooks token (sent as bearer auth)
+- `mode` (optional, default `openclaw-wake`):
+  - `openclaw-wake` → sends `{ text, mode }` for `/hooks/wake`
+  - `openclaw-agent` → sends `{ message, name, wakeMode }` for `/hooks/agent`
+  - `raw` → sends legacy JSON payload (`event/repo/branch/sha/...`)
+- `wake_mode` (optional, default `now`): `now` or `next-heartbeat`
 - `event_name` (optional, default `repo.pull.request`)
 - `extra_context` (optional)
+- `agent_name` (optional, default `GitHub`) for `openclaw-agent`
 - `timeout_seconds` (optional, default `10`)
 
 ## Output
 
 - `delivered`: `true` when HTTP request succeeds
 
-## Example usage in a repo
+## Example: OpenClaw wake hook (recommended)
 
 ```yaml
 name: Notify OpenClaw to Pull
@@ -27,26 +36,41 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Notify OpenClaw
-        uses: harvbot/openclaw-pull-notify-action@v1
+      - name: Trigger OpenClaw wake hook
+        uses: harvbot/openclaw-pull-notify-action@v2
         with:
-          notify_url: ${{ secrets.OPENCLAW_NOTIFY_URL }}
-          shared_secret: ${{ secrets.OPENCLAW_NOTIFY_TOKEN }}
-          extra_context: "cfc-vault"
+          hook_url: ${{ secrets.OPENCLAW_HOOK_URL }} # e.g. https://host/hooks/wake
+          shared_secret: ${{ secrets.OPENCLAW_HOOK_TOKEN }}
+          mode: openclaw-wake
+          wake_mode: now
+          extra_context: cfc-vault
 ```
 
-## Payload sent
+## Example: OpenClaw agent hook
 
-```json
-{
-  "event": "repo.pull.request",
-  "repo": "owner/repo",
-  "branch": "main",
-  "sha": "<commit_sha>",
-  "actor": "username",
-  "run_id": "123456789",
-  "run_attempt": "1",
-  "run_url": "https://github.com/owner/repo/actions/runs/123456789",
-  "context": "optional"
-}
+```yaml
+name: Notify OpenClaw Agent
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger OpenClaw agent hook
+        uses: harvbot/openclaw-pull-notify-action@v2
+        with:
+          hook_url: ${{ secrets.OPENCLAW_AGENT_HOOK_URL }} # e.g. https://host/hooks/agent
+          shared_secret: ${{ secrets.OPENCLAW_HOOK_TOKEN }}
+          mode: openclaw-agent
+          wake_mode: now
+          agent_name: GitHub
 ```
+
+## Notes
+
+- Keep your hook URL private and use a strong hook token.
+- OpenClaw hooks docs: https://docs.openclaw.ai/automation/webhook
+- `@v1` remains available for previous behavior; use `@v2` going forward.

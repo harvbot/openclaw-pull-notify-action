@@ -1,20 +1,35 @@
-name: "OpenClaw Pull Notify"
-description: "Send a lightweight repo-update notification to OpenClaw (or any endpoint) so a local agent can pull"
+name: "OpenClaw Hook Trigger"
+description: "Trigger OpenClaw webhook hooks from GitHub Actions (wake or agent), with optional legacy raw payload mode"
 author: "harvbot"
 inputs:
-  notify_url:
-    description: "HTTPS endpoint to receive the notification"
-    required: true
-  shared_secret:
-    description: "Optional bearer token sent as Authorization header"
+  hook_url:
+    description: "OpenClaw hook endpoint URL (for example: https://host/hooks/wake or /hooks/agent)"
     required: false
+  notify_url:
+    description: "Legacy alias for hook_url"
+    required: false
+  shared_secret:
+    description: "Hook token sent as Authorization bearer token"
+    required: true
+  mode:
+    description: "Payload mode: openclaw-wake, openclaw-agent, or raw"
+    required: false
+    default: "openclaw-wake"
+  wake_mode:
+    description: "Wake mode for OpenClaw hooks: now or next-heartbeat"
+    required: false
+    default: "now"
   event_name:
-    description: "Event label included in payload"
+    description: "Event label used in generated text"
     required: false
     default: "repo.pull.request"
   extra_context:
     description: "Optional freeform context string"
     required: false
+  agent_name:
+    description: "Name field for /hooks/agent payload"
+    required: false
+    default: "GitHub"
   timeout_seconds:
     description: "HTTP timeout in seconds"
     required: false
@@ -29,10 +44,14 @@ runs:
     - id: send
       shell: bash
       env:
+        INPUT_HOOK_URL: ${{ inputs.hook_url }}
         INPUT_NOTIFY_URL: ${{ inputs.notify_url }}
         INPUT_SHARED_SECRET: ${{ inputs.shared_secret }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_WAKE_MODE: ${{ inputs.wake_mode }}
         INPUT_EVENT_NAME: ${{ inputs.event_name }}
         INPUT_EXTRA_CONTEXT: ${{ inputs.extra_context }}
+        INPUT_AGENT_NAME: ${{ inputs.agent_name }}
         INPUT_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
         GH_REPOSITORY: ${{ github.repository }}
         GH_REF_NAME: ${{ github.ref_name }}
@@ -44,34 +63,66 @@ runs:
       run: |
         set -euo pipefail
 
+        URL="${INPUT_HOOK_URL:-}"
+        if [ -z "$URL" ]; then
+          URL="${INPUT_NOTIFY_URL:-}"
+        fi
+        if [ -z "$URL" ]; then
+          echo "hook_url (or legacy notify_url) is required" >&2
+          exit 1
+        fi
+
         payload=$(python3 - <<'PY'
 import json, os
-payload = {
-  "event": os.environ.get("INPUT_EVENT_NAME", "repo.pull.request"),
-  "repo": os.environ.get("GH_REPOSITORY"),
-  "branch": os.environ.get("GH_REF_NAME"),
-  "sha": os.environ.get("GH_SHA"),
-  "actor": os.environ.get("GH_ACTOR"),
-  "run_id": os.environ.get("GH_RUN_ID"),
-  "run_attempt": os.environ.get("GH_RUN_ATTEMPT"),
-  "run_url": f"{os.environ.get('GH_SERVER_URL')}/{os.environ.get('GH_REPOSITORY')}/actions/runs/{os.environ.get('GH_RUN_ID')}",
-}
-extra = os.environ.get("INPUT_EXTRA_CONTEXT", "").strip()
+mode = (os.environ.get("INPUT_MODE") or "openclaw-wake").strip().lower()
+repo = os.environ.get("GH_REPOSITORY")
+branch = os.environ.get("GH_REF_NAME")
+sha = os.environ.get("GH_SHA")
+actor = os.environ.get("GH_ACTOR")
+run_id = os.environ.get("GH_RUN_ID")
+server = os.environ.get("GH_SERVER_URL")
+event = os.environ.get("INPUT_EVENT_NAME", "repo.pull.request")
+extra = (os.environ.get("INPUT_EXTRA_CONTEXT") or "").strip()
+run_url = f"{server}/{repo}/actions/runs/{run_id}"
+
+text = f"[{event}] {repo} {branch} updated to {sha} by {actor}. Run: {run_url}"
 if extra:
-  payload["context"] = extra
+  text += f" | context: {extra}"
+
+if mode == "openclaw-agent":
+  payload = {
+    "message": text,
+    "name": os.environ.get("INPUT_AGENT_NAME", "GitHub"),
+    "wakeMode": os.environ.get("INPUT_WAKE_MODE", "now"),
+  }
+elif mode == "raw":
+  payload = {
+    "event": event,
+    "repo": repo,
+    "branch": branch,
+    "sha": sha,
+    "actor": actor,
+    "run_id": run_id,
+    "run_attempt": os.environ.get("GH_RUN_ATTEMPT"),
+    "run_url": run_url,
+  }
+  if extra:
+    payload["context"] = extra
+else:
+  payload = {
+    "text": text,
+    "mode": os.environ.get("INPUT_WAKE_MODE", "now"),
+  }
+
 print(json.dumps(payload, separators=(",",":")))
 PY
 )
 
-        headers=(-H "Content-Type: application/json")
-        if [ -n "${INPUT_SHARED_SECRET:-}" ]; then
-          headers+=(-H "Authorization: Bearer ${INPUT_SHARED_SECRET}")
-        fi
-
         curl --fail --show-error --silent \
           --max-time "${INPUT_TIMEOUT_SECONDS}" \
-          -X POST "${INPUT_NOTIFY_URL}" \
-          "${headers[@]}" \
+          -X POST "$URL" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${INPUT_SHARED_SECRET}" \
           --data "$payload" >/dev/null
 
         echo "delivered=true" >> "$GITHUB_OUTPUT"
