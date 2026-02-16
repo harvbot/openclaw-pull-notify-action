@@ -1,0 +1,77 @@
+name: "OpenClaw Pull Notify"
+description: "Send a lightweight repo-update notification to OpenClaw (or any endpoint) so a local agent can pull"
+author: "harvbot"
+inputs:
+  notify_url:
+    description: "HTTPS endpoint to receive the notification"
+    required: true
+  shared_secret:
+    description: "Optional bearer token sent as Authorization header"
+    required: false
+  event_name:
+    description: "Event label included in payload"
+    required: false
+    default: "repo.pull.request"
+  extra_context:
+    description: "Optional freeform context string"
+    required: false
+  timeout_seconds:
+    description: "HTTP timeout in seconds"
+    required: false
+    default: "10"
+outputs:
+  delivered:
+    description: "true if HTTP delivery succeeded"
+    value: ${{ steps.send.outputs.delivered }}
+runs:
+  using: "composite"
+  steps:
+    - id: send
+      shell: bash
+      env:
+        INPUT_NOTIFY_URL: ${{ inputs.notify_url }}
+        INPUT_SHARED_SECRET: ${{ inputs.shared_secret }}
+        INPUT_EVENT_NAME: ${{ inputs.event_name }}
+        INPUT_EXTRA_CONTEXT: ${{ inputs.extra_context }}
+        INPUT_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+        GH_REPOSITORY: ${{ github.repository }}
+        GH_REF_NAME: ${{ github.ref_name }}
+        GH_SHA: ${{ github.sha }}
+        GH_RUN_ID: ${{ github.run_id }}
+        GH_RUN_ATTEMPT: ${{ github.run_attempt }}
+        GH_ACTOR: ${{ github.actor }}
+        GH_SERVER_URL: ${{ github.server_url }}
+      run: |
+        set -euo pipefail
+
+        payload=$(python3 - <<'PY'
+import json, os
+payload = {
+  "event": os.environ.get("INPUT_EVENT_NAME", "repo.pull.request"),
+  "repo": os.environ.get("GH_REPOSITORY"),
+  "branch": os.environ.get("GH_REF_NAME"),
+  "sha": os.environ.get("GH_SHA"),
+  "actor": os.environ.get("GH_ACTOR"),
+  "run_id": os.environ.get("GH_RUN_ID"),
+  "run_attempt": os.environ.get("GH_RUN_ATTEMPT"),
+  "run_url": f"{os.environ.get('GH_SERVER_URL')}/{os.environ.get('GH_REPOSITORY')}/actions/runs/{os.environ.get('GH_RUN_ID')}",
+}
+extra = os.environ.get("INPUT_EXTRA_CONTEXT", "").strip()
+if extra:
+  payload["context"] = extra
+print(json.dumps(payload, separators=(",",":")))
+PY
+)
+
+        headers=(-H "Content-Type: application/json")
+        if [ -n "${INPUT_SHARED_SECRET:-}" ]; then
+          headers+=(-H "Authorization: Bearer ${INPUT_SHARED_SECRET}")
+        fi
+
+        curl --fail --show-error --silent \
+          --max-time "${INPUT_TIMEOUT_SECONDS}" \
+          -X POST "${INPUT_NOTIFY_URL}" \
+          "${headers[@]}" \
+          --data "$payload" >/dev/null
+
+        echo "delivered=true" >> "$GITHUB_OUTPUT"
